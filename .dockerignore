@@ -1,0 +1,14 @@
+# .dockerignore - exclude files that shouldn't go into the Docker image
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-journal
+*.db-wal
+demo_metrics.json
+metrics_report.json
+.git/
+.claude/
+third_party/
+.vscode/
+*.egg-info/

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=702solver 实验汇报入口
+Comment=启动多 Agent 实验汇报入口 (benchmark / 答辩快测)
+Path=/home/chen/projects/702solver
+Exec=/home/chen/projects/702solver/启动实验.sh
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;Science;

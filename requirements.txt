@@ -1,0 +1,6 @@
+numpy>=1.24.0
+msgpack>=1.0.5
+faiss-cpu>=1.7.4
+# Optional, for real embedding model (~2GB with torch):
+# sentence-transformers>=2.2.0
+requests>=2.28.0
