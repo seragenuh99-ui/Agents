@@ -1,4 +1,18 @@
-"""Retriever Agent: searches internal memory and external knowledge sources."""
+"""Retriever Agent — 多源信息检索：共享记忆 + 知识库 + LLM 研究。
+
+RetrieverAgent 负责为任务搜集相关证据，支持三种检索路径：
+1. 共享记忆搜索（跨任务复用）：通过 query_memory() 三路搜索
+2. 模拟知识库搜索（KNOWLEDGE_BASE）：关键词 + 标签路由匹配
+3. LLM 开放题研究（_llm_open_qa_research）：当 demo 知识库不适用时
+
+检索结果缓存：
+  对 cos > 0.88 的相似查询，复用已有的 evidence 类型检索结果，
+  跳过冗余搜索。
+
+标签路由优化：
+  _TAG_KB_CATEGORY 将标签映射到知识库类别，减少跨领域噪音。
+  例如 "solar" 标签只搜索 "renewable energy" 类别。
+"""
 
 from __future__ import annotations
 
@@ -16,7 +30,10 @@ from ..memory.store import MemoryStore
 from ..memory.models import MemoryUnit
 
 
-# Simulated knowledge base for deterministic testing
+# ============================================================
+# 模拟知识库 — 用于确定性测试
+# ============================================================
+
 KNOWLEDGE_BASE = {
     "renewable energy": {
         "solar": {
@@ -29,12 +46,7 @@ KNOWLEDGE_BASE = {
                 "Average solar panel lifespan: 25-30 years with 0.5%/year degradation",
             ],
             "technologies": ["Monocrystalline Silicon", "Polycrystalline Silicon", "Thin-Film", "Perovskite", "Bifacial"],
-            "key_metrics": {
-                "avg_efficiency": "18-22%",
-                "cost_per_watt": "$0.20-0.30",
-                "energy_payback_time": "1-4 years",
-                "carbon_footprint": "40-50 gCO2/kWh",
-            },
+            "key_metrics": {"avg_efficiency": "18-22%", "cost_per_watt": "$0.20-0.30", "energy_payback_time": "1-4 years", "carbon_footprint": "40-50 gCO2/kWh"},
             "tags": ["solar", "photovoltaic", "renewable", "energy", "sun"],
         },
         "wind": {
@@ -47,12 +59,7 @@ KNOWLEDGE_BASE = {
                 "Floating offshore wind enables deployment in deep waters (>60m)",
             ],
             "technologies": ["Horizontal Axis", "Vertical Axis", "Offshore Fixed", "Floating Offshore", "Small/Distributed"],
-            "key_metrics": {
-                "avg_capacity_factor": "25-55%",
-                "cost_per_mwh": "$30-60",
-                "turbine_lifespan": "20-25 years",
-                "carbon_footprint": "10-12 gCO2/kWh",
-            },
+            "key_metrics": {"avg_capacity_factor": "25-55%", "cost_per_mwh": "$30-60", "turbine_lifespan": "20-25 years", "carbon_footprint": "10-12 gCO2/kWh"},
             "tags": ["wind", "turbine", "renewable", "energy", "offshore"],
         },
         "hydro": {
@@ -65,12 +72,7 @@ KNOWLEDGE_BASE = {
                 "Norway generates 95%+ of its electricity from hydropower",
             ],
             "technologies": ["Conventional Dam", "Run-of-River", "Pumped Storage", "Small Hydro", "Tidal"],
-            "key_metrics": {
-                "efficiency": "90%+ (turbine efficiency)",
-                "capacity_factor": "30-60%",
-                "lifespan": "50-100 years",
-                "carbon_footprint": "24 gCO2/kWh (reservoir)",
-            },
+            "key_metrics": {"efficiency": "90%+ (turbine efficiency)", "capacity_factor": "30-60%", "lifespan": "50-100 years", "carbon_footprint": "24 gCO2/kWh (reservoir)"},
             "tags": ["hydro", "water", "renewable", "energy", "dam"],
         },
     },
@@ -78,72 +80,29 @@ KNOWLEDGE_BASE = {
         "security_patterns": {
             "summary": "Common security vulnerability patterns in Python code: SQL injection, XSS, command injection, insecure deserialization, hardcoded credentials, path traversal, and improper access control.",
             "patterns": [
-                {
-                    "name": "SQL Injection",
-                    "detection": "String formatting in SQL queries: f-strings, .format(), % operator with user input",
-                    "severity": "critical",
-                    "fix": "Use parameterized queries with ? placeholders",
-                },
-                {
-                    "name": "Command Injection",
-                    "detection": "os.system(), subprocess with shell=True and user input",
-                    "severity": "critical",
-                    "fix": "Use subprocess.run with list args and shell=False",
-                },
-                {
-                    "name": "Path Traversal",
-                    "detection": "File operations with unsanitized user input paths",
-                    "severity": "high",
-                    "fix": "Use os.path.realpath and validate against allowed directories",
-                },
-                {
-                    "name": "Hardcoded Secrets",
-                    "detection": "API keys, passwords, tokens directly in source code",
-                    "severity": "high",
-                    "fix": "Use environment variables or secret management services",
-                },
-                {
-                    "name": "Insecure Deserialization",
-                    "detection": "pickle.loads with untrusted input",
-                    "severity": "critical",
-                    "fix": "Use JSON or other safe serialization formats",
-                },
+                {"name": "SQL Injection", "detection": "String formatting in SQL queries: f-strings, .format(), % operator with user input", "severity": "critical", "fix": "Use parameterized queries with ? placeholders"},
+                {"name": "Command Injection", "detection": "os.system(), subprocess with shell=True and user input", "severity": "critical", "fix": "Use subprocess.run with list args and shell=False"},
+                {"name": "Path Traversal", "detection": "File operations with unsanitized user input paths", "severity": "high", "fix": "Use os.path.realpath and validate against allowed directories"},
+                {"name": "Hardcoded Secrets", "detection": "API keys, passwords, tokens directly in source code", "severity": "high", "fix": "Use environment variables or secret management services"},
+                {"name": "Insecure Deserialization", "detection": "pickle.loads with untrusted input", "severity": "critical", "fix": "Use JSON or other safe serialization formats"},
             ],
             "tags": ["security", "vulnerability", "code", "python", "pattern"],
         },
         "best_practices": {
             "summary": "Python coding best practices: use type hints, follow PEP 8, write docstrings, use context managers, prefer list comprehensions over loops for simple cases, use generators for large datasets.",
-            "practices": [
-                "Use pathlib instead of os.path for file operations",
-                "Use dataclasses for simple data containers",
-                "Use f-strings for string formatting (Python 3.6+)",
-                "Handle exceptions at the appropriate level",
-                "Write tests with pytest",
-            ],
+            "practices": ["Use pathlib instead of os.path for file operations", "Use dataclasses for simple data containers", "Use f-strings for string formatting (Python 3.6+)", "Handle exceptions at the appropriate level", "Write tests with pytest"],
             "tags": ["best-practices", "python", "coding", "style"],
         },
     },
     "database systems": {
-        "sql_optimization": {
-            "summary": "SQL optimization: choose B-tree indexes for range/equality, Hash for equality-only, GiST for full-text/geo. Use EXPLAIN ANALYZE for actual row counts and timing. Prefer hash join for large equi-joins, nested loop for small tables, merge join for sorted inputs. Materialized views trade storage for read speed.",
-            "tags": ["database", "sql", "index", "query", "optimization", "explain"],
-        },
-        "nosql_comparison": {
-            "summary": "Redis: in-memory key-value, low latency, eventual consistency in cluster mode. MongoDB: document model, flexible schema, secondary indexes. Cassandra: wide-column, linear write scaling, tunable consistency. Neo4j: graph traversals, Cypher queries, relationship-heavy workloads.",
-            "tags": ["database", "nosql", "redis", "mongodb", "cassandra", "neo4j"],
-        },
-        "performance_tuning": {
-            "summary": "Connection pooling (PgBouncer, HikariCP) reduces handshake overhead. PostgreSQL: shared_buffers ~25% RAM, effective_cache_size ~75% RAM, tune wal_buffers and checkpoint_timeout. MySQL: innodb_buffer_pool_size dominant. Replication lag: synchronous replicas vs async, parallel apply.",
-            "tags": ["database", "performance", "postgresql", "mysql", "pool", "replication"],
-        },
-        "data_modeling": {
-            "summary": "Normalization reduces redundancy; denormalization speeds reads. Star schema: fact table + dimension tables for OLAP; snowflake normalizes dimensions further. Temporal data: valid-time vs transaction-time columns. Hierarchies: adjacency list (simple), nested sets (read-heavy), materialized path (flexible queries).",
-            "tags": ["database", "modeling", "schema", "normalization", "star", "entity"],
-        },
+        "sql_optimization": {"summary": "SQL optimization: choose B-tree indexes for range/equality, Hash for equality-only, GiST for full-text/geo. Use EXPLAIN ANALYZE for actual row counts and timing. Prefer hash join for large equi-joins, nested loop for small tables, merge join for sorted inputs. Materialized views trade storage for read speed.", "tags": ["database", "sql", "index", "query", "optimization", "explain"]},
+        "nosql_comparison": {"summary": "Redis: in-memory key-value, low latency, eventual consistency in cluster mode. MongoDB: document model, flexible schema, secondary indexes. Cassandra: wide-column, linear write scaling, tunable consistency. Neo4j: graph traversals, Cypher queries, relationship-heavy workloads.", "tags": ["database", "nosql", "redis", "mongodb", "cassandra", "neo4j"]},
+        "performance_tuning": {"summary": "Connection pooling (PgBouncer, HikariCP) reduces handshake overhead. PostgreSQL: shared_buffers ~25% RAM, effective_cache_size ~75% RAM, tune wal_buffers and checkpoint_timeout. MySQL: innodb_buffer_pool_size dominant. Replication lag: synchronous replicas vs async, parallel apply.", "tags": ["database", "performance", "postgresql", "mysql", "pool", "replication"]},
+        "data_modeling": {"summary": "Normalization reduces redundancy; denormalization speeds reads. Star schema: fact table + dimension tables for OLAP; snowflake normalizes dimensions further. Temporal data: valid-time vs transaction-time columns. Hierarchies: adjacency list (simple), nested sets (read-heavy), materialized path (flexible queries).", "tags": ["database", "modeling", "schema", "normalization", "star", "entity"]},
     },
 }
 
-# Tag → KB category routing (reduces cross-domain KB noise; inspired by task-aware retrieval)
+# 标签 → KB 类别路由表（减少跨领域噪音）
 _TAG_KB_CATEGORY: Dict[str, str] = {}
 for _cat, _topics in KNOWLEDGE_BASE.items():
     for _data in _topics.values():
@@ -151,10 +110,23 @@ for _cat, _topics in KNOWLEDGE_BASE.items():
             _TAG_KB_CATEGORY[_tag] = _cat
 
 
-class RetrieverAgent(BaseAgent):
-    """Agent responsible for information retrieval from internal memory and knowledge bases.
+# ============================================================
+# RetrieverAgent — 多源信息检索
+# ============================================================
 
-    Capabilities: retrieve, search, query_memory, store_memory
+class RetrieverAgent(BaseAgent):
+    """信息检索 Agent：搜索内部记忆和外部知识源。
+
+    核心能力：retrieve（检索）, search（搜索）, query_memory（记忆查询）, store_memory（记忆存储）
+
+    检索流程：
+    1. 合并 Orchestrator 的主动建议记忆
+    2. 缓存检查：cos > 0.88 时复用已有检索结果
+    3. 共享记忆搜索（三路：关键词 + 标签 + 语义）
+    4. 知识库搜索（标签路由 + 关键词匹配，开放题跳过）
+    5. 开放题 LLM 知识补充
+    6. 合并去重 + 全局字符预算（AgentPrune）
+    7. 存储检索结果 + 状态传递
     """
 
     def __init__(
@@ -179,6 +151,8 @@ class RetrieverAgent(BaseAgent):
         )
         self.run_options = None
 
+    # ---- 消息处理 ----
+
     def handle_message(self, message: Message) -> Optional[Message]:
         if message.msg_type == MessageType.REQUEST:
             if message.action == ActionType.RETRIEVE:
@@ -194,13 +168,16 @@ class RetrieverAgent(BaseAgent):
             memory_refs=result.get("memory_refs", []),
         )
 
-    def execute_task(self, task_input: Dict[str, Any]) -> Dict[str, Any]:
-        """Search for information using multiple strategies.
+    # ---- 核心任务执行 ----
 
-        Strategies:
-        1. Search internal shared memory (cross-task reuse)
-        2. Search simulated knowledge base
-        3. Generate embedding for semantic matching
+    def execute_task(self, task_input: Dict[str, Any]) -> Dict[str, Any]:
+        """多策略信息检索。
+
+        Args:
+            task_input: 包含 query, tags, task_id, 可选 suggested_memories
+
+        Returns:
+            包含 memory_hits, knowledge_base_hits, combined_results 的字典
         """
         t0 = time.time()
         query = task_input.get("query", "")
@@ -217,7 +194,7 @@ class RetrieverAgent(BaseAgent):
             "memory_refs": [],
         }
 
-        # --- Incorporate proactively suggested memories from orchestrator ---
+        # ---- 合并 Orchestrator 的主动建议记忆 ----
         suggested = task_input.get("suggested_memories", [])
         for s in suggested:
             results["memory_hits"].append({
@@ -229,7 +206,7 @@ class RetrieverAgent(BaseAgent):
             })
             results["memory_refs"].append(s["memory_id"])
 
-        # --- Cache check: reuse cached retrieval results for near-identical queries ---
+        # ---- 检索结果缓存：cos > 阈值时复用已有结果 ----
         cache_th = 0.88
         if getattr(self, "run_options", None) is not None:
             cache_th = self.run_options.retriever_cache_threshold
@@ -255,9 +232,9 @@ class RetrieverAgent(BaseAgent):
             except Exception:
                 pass
 
-        # Only do fresh search if no cache hit
+        # 无缓存命中时执行全新检索
         if not results.get("_cached_from"):
-            # 1. Search shared memory
+            # 1. 共享记忆搜索
             memory_results = self.query_memory(query=query, tags=tags, limit=5)
             for mem in memory_results:
                 results["memory_hits"].append({
@@ -270,14 +247,14 @@ class RetrieverAgent(BaseAgent):
                 })
                 results["memory_refs"].append(mem.memory_id)
 
-            # 2. Search knowledge base (skipped for open Q&A — demo KB is energy/security only)
+            # 2. 知识库搜索（开放题跳过 — demo KB 仅覆盖能源/安全/数据库）
             if is_open_qa(query, tags):
                 kb_hits = []
             else:
                 kb_hits = self._search_knowledge_base(query, tags=tags)
             results["knowledge_base_hits"] = kb_hits
 
-            # 2b. Open Q&A: supplement with model knowledge (no fake KB pollution)
+            # 2b. 开放题 LLM 知识补充
             if is_open_qa(query, tags):
                 self._emit_status("② 检索：开放题，调用模型补充相关知识…")
                 llm_notes = self._llm_open_qa_research(query)
@@ -291,14 +268,12 @@ class RetrieverAgent(BaseAgent):
                         "source": "llm",
                     })
 
-            # 3. Combine results (dedup + global budget — AgentPrune)
+            # 3. 合并结果（去重 + 全局字符预算 — AgentPrune）
             max_ev = 750
             if getattr(self, "run_options", None) is not None:
                 max_ev = self.run_options.evidence_max_chars
             combined = self._build_combined_evidence(
-                results["memory_hits"],
-                results["knowledge_base_hits"],
-                max_chars=max_ev,
+                results["memory_hits"], results["knowledge_base_hits"], max_chars=max_ev,
             )
             if results.get("llm_research"):
                 extra = f"\n=== Model Research ===\n{results['llm_research']}"
@@ -312,7 +287,7 @@ class RetrieverAgent(BaseAgent):
         results["memory_hit_count"] = len(results["memory_hits"])
         results["elapsed_ms"] = (time.time() - t0) * 1000
 
-        # Store retrieval results in shared memory
+        # ---- 存储检索结果到共享记忆 ----
         if results["hit_count"] > 0:
             memory_id = self.store_memory(
                 topic=f"Retrieval: {query[:80]}",
@@ -324,7 +299,7 @@ class RetrieverAgent(BaseAgent):
             )
             results["memory_refs"].append(memory_id)
 
-        # Transfer state embedding to next agent
+        # ---- 状态传递：将检索嵌入发送给 Executor ----
         self.transfer_state(
             target_agent="executor",
             state_data={"retrieval_results": results, "query": query},
@@ -334,13 +309,15 @@ class RetrieverAgent(BaseAgent):
         self._task_history.append({"task_id": task_id, "query": query, "hit_count": results["hit_count"]})
         return results
 
+    # ---- 证据合并 ----
+
     @staticmethod
     def _build_combined_evidence(
         memory_hits: List[Dict[str, Any]],
         kb_hits: List[Dict[str, Any]],
         max_chars: int = 800,
     ) -> str:
-        """Merge retrieval hits with dedup and a single downstream size cap."""
+        """合并检索命中结果，去重并应用字符预算上限。"""
         seen: set = set()
         lines: List[str] = []
 
@@ -368,8 +345,10 @@ class RetrieverAgent(BaseAgent):
             combined = combined[:max_chars] + "\n...[truncated]"
         return combined
 
+    # ---- 知识库搜索 ----
+
     def _resolve_kb_categories(self, tags: List[str]) -> List[str]:
-        """Map task tags to KB categories; fallback to all categories."""
+        """将任务标签映射到知识库类别；无标签时搜索全部类别。"""
         if tags and is_open_qa("", tags):
             return []
         if not tags:
@@ -384,7 +363,10 @@ class RetrieverAgent(BaseAgent):
     def _search_knowledge_base(
         self, query: str, tags: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Search simulated KB with tag-aware category filter + keyword match."""
+        """搜索模拟知识库：标签路由 + 关键词匹配。
+
+        标签路由减少跨领域噪音（例如 "solar" 标签只搜索 "renewable energy"）。
+        """
         hits = []
         query_lower = query.lower()
         query_words = set(query_lower.split())
@@ -412,9 +394,14 @@ class RetrieverAgent(BaseAgent):
 
         return hits[:6]
 
+    # ---- 开放题 LLM 研究 ----
+
     def _llm_open_qa_research(self, query: str) -> str:
-        """LLM-backed facts for open questions when demo KB does not apply."""
-        cjk = any("\u4e00" <= c <= "\u9fff" for c in query)
+        """当 demo 知识库不适用时，使用 LLM 获取背景知识。
+
+        针对中文问题使用中文提示词，要求准确、实用、不分条列项。
+        """
+        cjk = any("一" <= c <= "鿿" for c in query)
         if cjk:
             system = (
                 "你是知识检索助手。根据问题列出准确、实用的要点（地名、特色、建议），"

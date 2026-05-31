@@ -192,6 +192,7 @@ def cmd_experiment(args):
         class MockLLM:
             def __init__(self):
                 self.call_count = 0
+                self.last_elapsed_ms = 0.0
             def chat(self, messages, **kwargs):
                 self.call_count += 1
                 return f"[Mock #{self.call_count}] Processing: {messages[-1]['content'][:100]}..."
@@ -238,7 +239,7 @@ def cmd_experiment(args):
     )
     reporter = Reporter(orchestrator.metrics)
     print("\n" + reporter.generate_comparison_table())
-
+    orchestrator.cleanup()
     return 0
 
 
@@ -298,12 +299,13 @@ def cmd_single(args):
     print(f"\n  Memory refs: {steps.get('summary', {}).get('evidence_refs', [])}")
 
     # Show stats
-    print("\n" + orchestrator.print_system_status())
-
     reporter = Reporter(orchestrator.metrics)
+    print("\n" + orchestrator.print_system_status())
+    print("\n" + reporter.generate_comparison_table())
+
     json_path = reporter.export_json(result_path("single_task_metrics.json"))
     print(f"\n  Metrics saved to: {json_path}")
-
+    orchestrator.cleanup()
     return 0
 
 
@@ -343,6 +345,7 @@ def cmd_demo(args):
         class MockLLM:
             def __init__(self):
                 self.call_count = 0
+                self.last_elapsed_ms = 0.0
 
             def chat(self, messages, **kwargs):
                 self.call_count += 1
@@ -429,7 +432,14 @@ def cmd_demo(args):
                         print(f"      - [{mem.memory_type}] {mem.summary[:80]}")
 
             if summary:
-                print(f"    Summary: {summary.get('summary', 'N/A')[:150]}")
+                inner = summary.get('summary', summary)
+                if isinstance(inner, dict):
+                    text = inner.get('conclusion', '') or '; '.join(
+                        inner.get('key_findings', [])[:2]
+                    ) or str(inner)
+                else:
+                    text = str(inner)
+                print(f"    Summary: {text[:150]}")
 
             print(f"    Latency: {result.get('elapsed_ms', 0):.1f} ms")
 

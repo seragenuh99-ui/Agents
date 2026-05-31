@@ -1,7 +1,26 @@
-"""Multi-agent task orchestrator.
+"""多 Agent 任务编排器 — 协调 Planner、Retriever、Executor、Summarizer。
 
-Coordinates the Planner, Retriever, Executor, and Summarizer agents
-to execute complex tasks using either structured protocol or text mode.
+Orchestrator 是整个系统的中央协调器，管理 Agent 生命周期、任务管线执行、
+指标收集和缓存策略。
+
+核心执行管线（execute_task）：
+  1. E2E 缓存检查 → 精确匹配时跳过整个管线
+  2. 领域计划种子 → 从相似策略加载计划模板，避免完整 LLM 生成
+  3. 规划（Planner）→ 任务分解为子任务
+  4. 按依赖层级执行子任务 → 同角色同级并行（ThreadPoolExecutor）
+  5. 综合（Summarizer）→ 生成最终报告
+
+三级缓存体系：
+  - E2E 精确缓存（cos >= 0.85）：跳过整个管线
+  - 领域计划播种（cos >= 0.68）：模板填入，跳过完整规划
+  - Executor 剔除（模板填入分 >= 0.65）：跳过执行 Agent
+
+优化机制：
+  - 主动记忆建议：执行前向 Agent 注入相关历史记忆
+  - 批量嵌入搜索：encode_batch() 单次模型前向传递
+  - SafeSieve-lite：记录模板使用结果，低成功率模板降权
+  - 意图门控：防止不同意图类型间的缓存误用
+  - AgentPrune：限制下游 Agent 的记忆建议数量
 """
 
 from __future__ import annotations
@@ -18,6 +37,7 @@ from .agents.retriever import RetrieverAgent
 from .agents.executor import ExecutorAgent
 from .agents.summarizer import SummarizerAgent
 from .protocol import ActionType
+from .protocol import ProtocolParser
 from .protocol.scheduler import Scheduler, AgentRegistry, MessageBus
 from .state.embeddings import EmbeddingEngine
 from .state.exchange import StateExchangeBus
@@ -36,11 +56,11 @@ from .task_intent import (
 
 
 class Orchestrator:
-    """Orchestrates multi-agent task execution with metrics collection.
+    """多 Agent 任务编排器，支持结构化协议和文本模式。
 
-    Supports two modes:
-    - "structured": Uses compact structured protocol + non-text state passing
-    - "text": Uses traditional natural language communication (baseline)
+    两种模式：
+    - "structured"：紧凑结构化协议 + 非文本状态传递（本系统的核心创新）
+    - "text"：传统自然语言 Agent 通信（基线对照）
     """
 
     def __init__(
@@ -61,7 +81,7 @@ class Orchestrator:
             "EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"
         )
 
-        # Core infrastructure
+        # ---- 核心基础设施 ----
         self.registry = AgentRegistry()
         self.message_bus = MessageBus()
         self.scheduler = Scheduler(self.registry, self.message_bus)
@@ -74,10 +94,10 @@ class Orchestrator:
         self.metrics = MetricsCollector()
         self._progress_fn: Optional[Any] = None
 
-        # LLM backend
+        # LLM 后端
         self.llm = llm or LLMBackend()
 
-        # Create agents
+        # ---- 创建 Agent ----
         use_structured = (mode == "structured")
         self.planner = PlannerAgent(
             self.scheduler, self.llm, self.embedding_engine,
@@ -97,11 +117,13 @@ class Orchestrator:
             self.state_bus, self.memory_store, use_structured,
         )
 
+        # 记忆索引开关
         if not self.run_options.enable_memory_index:
             self.memory_store._index = None
             self.memory_store._id_to_idx.clear()
             self.memory_store._idx_to_id.clear()
 
+        # 注入 run_options 到各 Agent
         for agent in (self.planner, self.retriever, self.executor, self.summarizer):
             agent.run_options = self.run_options
 
@@ -112,12 +134,16 @@ class Orchestrator:
             "summarizer": self.summarizer,
         }
 
+    # ============================================================
+    # 依赖层级构建
+    # ============================================================
+
     @staticmethod
     def _build_dependency_levels(subtasks: List[Dict]) -> List[List[Dict]]:
-        """Group subtasks into topological levels for parallel execution.
+        """将子任务按拓扑排序分组为依赖层级，同级可并行执行。
 
-        Subtasks with no dependencies (depends_on empty) run first;
-        subtasks depending on completed steps run in subsequent levels.
+        无依赖（depends_on 为空）的子任务在第一层；
+        依赖已完成步骤的子任务在后续层级。
         """
         if not subtasks:
             return []
@@ -137,7 +163,7 @@ class Orchestrator:
                     next_remaining.append(st)
 
             if not current_level:
-                # Circular dependency or error — push remaining sequentially
+                # 循环依赖或错误 → 剩余任务顺序执行
                 levels.append(list(remaining))
                 break
 
@@ -148,14 +174,16 @@ class Orchestrator:
 
         return levels
 
+    # ============================================================
+    # 主动记忆建议（单个 + 批量）
+    # ============================================================
+
     def _suggest_memories(
         self, text: str, limit: int = 2, min_score: float = 0.35
     ) -> List[Dict[str, Any]]:
-        """Proactively retrieve relevant memories for an agent before execution.
+        """在执行前为 Agent 主动检索相关历史记忆。
 
-        Encodes the given text as embedding and searches the shared memory
-        for semantically similar entries. Returns a list of compact
-        suggestion dicts suitable for injection into agent params.
+        编码文本为嵌入向量 → FAISS 语义搜索 → 返回简洁建议字典列表。
         """
         if self.memory_store._index is None or self.memory_store._index.ntotal == 0:
             return []
@@ -175,14 +203,49 @@ class Orchestrator:
                 })
         return suggestions
 
+    def _suggest_memories_batch(
+        self, texts: List[str], limit: int = 2, min_score: float = 0.35
+    ) -> List[List[Dict[str, Any]]]:
+        """为多段文本批量检索记忆建议。
+
+        使用 EmbeddingEngine.encode_batch() 单次模型前向传递，
+        然后分别对每个嵌入做 FAISS 搜索。
+        """
+        if (not texts or self.memory_store._index is None
+                or self.memory_store._index.ntotal == 0):
+            return [[] for _ in texts]
+        try:
+            embs = self.embedding_engine.encode_batch(texts)
+        except Exception:
+            return [[] for _ in texts]
+        all_suggestions: List[List[Dict[str, Any]]] = []
+        for emb in embs:
+            try:
+                results = self.memory_store.search_by_similarity(emb, limit=limit)
+            except Exception:
+                all_suggestions.append([])
+                continue
+            suggestions = []
+            for mem, score in results:
+                if score > min_score:
+                    suggestions.append({
+                        "memory_id": mem.memory_id,
+                        "summary": mem.summary[:200],
+                        "type": mem.memory_type,
+                        "relevance": round(score, 3),
+                    })
+            all_suggestions.append(suggestions)
+        return all_suggestions
+
+    # ============================================================
+    # LLM 判断相似性
+    # ============================================================
+
     def _llm_judge_similar(self, task_a: str, task_b: str) -> bool:
-        """Use LLM to judge if two task descriptions represent the same kind of work.
+        """用 LLM 判断两个任务是否属于同一类工作。
 
-        This is the P0 'LLM-as-judge' mechanism: FAISS embedding provides fast
-        coarse recall (cos>0.50), then this method provides high-precision
-        verification before triggering cache reuse.
-
-        Cost: ~50 prompt tokens + ~3 completion tokens per judgment.
+        P0 "LLM-as-judge" 机制：FAISS 嵌入提供快速粗粒度召回（cos > 0.50），
+        LLM 判断提供高精度验证。成本：约 50 prompt tokens + 3 completion tokens/次。
         """
         if not task_a or not task_b:
             return False
@@ -197,8 +260,12 @@ class Orchestrator:
         except Exception:
             return False
 
+    # ============================================================
+    # 辅助工具
+    # ============================================================
+
     def _extract_task_desc(self, mem) -> str:
-        """Extract a clean task description from a memory unit's task_topic."""
+        """从记忆的 task_topic 中提取干净的任务描述。"""
         topic = getattr(mem, 'task_topic', '') or ''
         for prefix in ["Summary: ", "Plan: ", "Execution: ", "Retrieval: "]:
             if topic.startswith(prefix):
@@ -207,11 +274,13 @@ class Orchestrator:
 
     @staticmethod
     def _tags_overlap(task_tags: List[str], cached_tags: List[str]) -> bool:
+        """检查两组标签是否有交集。"""
         if not task_tags or not cached_tags:
             return True
         return any(t in cached_tags for t in task_tags)
 
     def _parse_result_payload(self, mem) -> Optional[Dict[str, Any]]:
+        """解析记忆内容中的结果负载。"""
         try:
             cached = json.loads(mem.content)
         except (json.JSONDecodeError, TypeError):
@@ -224,9 +293,23 @@ class Orchestrator:
         return None
 
     def _effective_score(self, mem, raw_score: float) -> float:
+        """计算记忆的有效相似度分数（策略类型应用 SafeSieve 降权）。"""
         if mem.memory_type == "strategy":
             return self.memory_store.effective_similarity(mem, raw_score)
         return raw_score
+
+    def _progress(self, msg: str) -> None:
+        """向进度回调发送消息。"""
+        if self._progress_fn:
+            self._progress_fn(msg)
+
+    def _llm_calls(self) -> int:
+        """获取累计 LLM API 调用次数。"""
+        return self.llm.get_usage_stats().get("call_count", 0)
+
+    # ============================================================
+    # E2E 缓存
+    # ============================================================
 
     def _finish_e2e(
         self,
@@ -240,6 +323,7 @@ class Orchestrator:
         t0: float,
         msg_count_before: int,
     ) -> Dict[str, Any]:
+        """完成 E2E 缓存命中：构建结果并结束指标记录。"""
         result = {
             "task_id": task_id,
             "task_description": task_description,
@@ -265,7 +349,12 @@ class Orchestrator:
         t0: float,
         msg_count_before: int,
     ) -> Optional[Dict[str, Any]]:
-        """Reuse a past result when task embedding is similar enough (exact / summarizer E2E)."""
+        """尝试 E2E 缓存复用：任务嵌入足够相似时直接返回历史结果。
+
+        两级匹配：
+        - exact（cos >= e2e_threshold，默认 0.85）：完全复用
+        - summarizer（cos >= summarizer_e2e_threshold）：Summarizer E2E 复用
+        """
         if (
             not self.run_options.enable_e2e_cache
             or self.mode != "structured"
@@ -299,14 +388,9 @@ class Orchestrator:
 
             if score >= self.run_options.e2e_threshold:
                 return self._finish_e2e(
-                    task_id=task_id,
-                    task_description=task_description,
-                    cached=cached,
-                    mem=mem,
-                    match_type="exact",
-                    score=score,
-                    t0=t0,
-                    msg_count_before=msg_count_before,
+                    task_id=task_id, task_description=task_description,
+                    cached=cached, mem=mem, match_type="exact",
+                    score=score, t0=t0, msg_count_before=msg_count_before,
                 )
 
             if (
@@ -314,21 +398,24 @@ class Orchestrator:
                 and score >= self.run_options.summarizer_e2e_threshold
             ):
                 return self._finish_e2e(
-                    task_id=task_id,
-                    task_description=task_description,
-                    cached=cached,
-                    mem=mem,
-                    match_type="summarizer",
-                    score=score,
-                    t0=t0,
-                    msg_count_before=msg_count_before,
+                    task_id=task_id, task_description=task_description,
+                    cached=cached, mem=mem, match_type="summarizer",
+                    score=score, t0=t0, msg_count_before=msg_count_before,
                 )
         return None
+
+    # ============================================================
+    # 领域计划播种
+    # ============================================================
 
     def _load_domain_plan_hint(
         self, task_description: str, tags: Optional[List[str]]
     ) -> tuple:
-        """Find a strategy plan to seed Planner without LLM-as-judge (~50 tok each)."""
+        """查找相似策略计划作为 Planner 的种子模板。
+
+        跳过 LLM-as-judge（~50 tok/次），直接按 cos >= domain_plan_threshold
+        匹配，大幅减少 API 调用。
+        """
         if self.memory_store._index is None or self.memory_store._index.ntotal == 0:
             return None, 0.0, ""
         try:
@@ -361,6 +448,10 @@ class Orchestrator:
             pass
         return None, 0.0, ""
 
+    # ============================================================
+    # 子任务执行
+    # ============================================================
+
     def _execute_subtask(
         self,
         subtask: Dict[str, Any],
@@ -373,7 +464,13 @@ class Orchestrator:
         retrieval_refs: Optional[List[str]] = None,
         execution_refs: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Execute a single subtask and return its result."""
+        """执行单个子任务并返回结果。
+
+        路由逻辑：
+        - retriever → 检索子任务，含主动记忆建议
+        - executor → 执行子任务（AgentPrune：executor 无记忆建议）
+        - summarizer → 综合子任务（限制 1 条记忆建议，min_score=0.40）
+        """
         role = subtask.get("agent_role", "")
         step = subtask.get("step", 0)
         role_cn = {
@@ -384,7 +481,7 @@ class Orchestrator:
         desc_snip = (subtask.get("description") or "")[:36]
         self._progress(f"{role_cn}：子任务 {step}（{desc_snip}…）")
 
-        # Proactive memory suggestion — tighter limits per role (AgentPrune-style)
+        # 主动记忆建议 — 按角色限制数量（AgentPrune 风格）
         suggestion_text = subtask.get("description", "") + " " + str(subtask.get("params", {}))
         if role == "executor":
             suggested = []
@@ -394,6 +491,9 @@ class Orchestrator:
             suggested = self._suggest_memories(suggestion_text, limit=2, min_score=0.35)
 
         if role == "retriever":
+            capable = self.scheduler.discover_capable_agents("retrieve")
+            if capable and "retriever" not in capable:
+                self._progress(f"警告：retriever 不支持 retrieve 能力，可用: {capable}")
             msg = self.scheduler.route_task(
                 action=ActionType.RETRIEVE,
                 params={
@@ -405,11 +505,15 @@ class Orchestrator:
                 from_agent="orchestrator",
                 to_agent="retriever",
             )
-            result = self.retriever.execute_task(msg.params)
-            self.scheduler.send_response(msg, result=result)
-            n = len(result.get("memory_hits", [])) + len(
-                result.get("knowledge_base_hits", [])
-            )
+            if self.run_options.enable_message_dispatch:
+                responses = self.retriever.process_pending_messages()
+                result = responses[0].result if responses else {}
+            else:
+                result = self.retriever.execute_task(msg.params)
+                if result.get("error"):
+                    self.scheduler.bus.send(ProtocolParser.create_error(msg, str(result["error"])))
+                self.scheduler.send_response(msg, result=result)
+            n = len(result.get("memory_hits", [])) + len(result.get("knowledge_base_hits", []))
             self._progress(f"② 检索：子任务 {step} 完成（命中 {n} 条）")
             return {"step": step, "role": role, "result": result}
 
@@ -425,8 +529,14 @@ class Orchestrator:
                 from_agent="orchestrator",
                 to_agent="executor",
             )
-            result = self.executor.execute_task(msg.params)
-            self.scheduler.send_response(msg, result=result)
+            if self.run_options.enable_message_dispatch:
+                responses = self.executor.process_pending_messages()
+                result = responses[0].result if responses else {}
+            else:
+                result = self.executor.execute_task(msg.params)
+                if result.get("error"):
+                    self.scheduler.bus.send(ProtocolParser.create_error(msg, str(result["error"])))
+                self.scheduler.send_response(msg, result=result)
             self._progress(f"③ 执行：子任务 {step} 完成")
             return {"step": step, "role": role, "result": result}
 
@@ -435,8 +545,7 @@ class Orchestrator:
                 action=ActionType.SUMMARIZE,
                 params={
                     "task_id": task_id,
-                    "task_description": task_description
-                    or plan.get("task_description", ""),
+                    "task_description": task_description or plan.get("task_description", ""),
                     "plan": plan,
                     "plan_ref": plan.get("memory_id", ""),
                     "retrieval_refs": retrieval_refs or [],
@@ -449,30 +558,35 @@ class Orchestrator:
                 from_agent="orchestrator",
                 to_agent="summarizer",
             )
-            result = self.summarizer.execute_task(msg.params)
-            self.scheduler.send_response(msg, result=result)
+            if self.run_options.enable_message_dispatch:
+                responses = self.summarizer.process_pending_messages()
+                result = responses[0].result if responses else {}
+            else:
+                result = self.summarizer.execute_task(msg.params)
+                if result.get("error"):
+                    self.scheduler.bus.send(ProtocolParser.create_error(msg, str(result["error"])))
+                self.scheduler.send_response(msg, result=result)
             self._progress(f"④ 总结：子任务 {step} 完成")
             return {"step": step, "role": role, "result": result}
 
         return {"step": step, "role": role, "result": {}}
 
-    def _progress(self, msg: str) -> None:
-        if self._progress_fn:
-            self._progress_fn(msg)
-
-    def _llm_calls(self) -> int:
-        return self.llm.get_usage_stats().get("call_count", 0)
+    # ============================================================
+    # 任务执行主入口
+    # ============================================================
 
     def execute_task(self, task_id: str, task_description: str, tags: List[str] = None) -> Dict[str, Any]:
-        """Execute a single task through the full agent pipeline.
+        """执行完整的多 Agent 任务管线。
 
-        Pipeline: Plan -> [Retrieve || Execute]* -> Summarize
-        Independent subtasks of the same dependency level run in parallel.
+        管线：Plan → [Retrieve || Execute]* → Summarize
+        同级独立子任务并行执行（ThreadPoolExecutor）。
         """
         self.metrics.start_task(task_id, task_description, self.mode)
         t0 = time.time()
         msg_count_before = len(self.message_bus._history)
         calls_at_start = self._llm_calls()
+        memories_before = self.memory_store.get_stats()["total_memories"]
+        state_transfers_before = self.state_bus.get_stats()["total_transfers"]
 
         result = {
             "task_id": task_id,
@@ -481,10 +595,10 @@ class Orchestrator:
             "steps": {},
         }
 
-        forbid_e2e = (tags and "no-e2e-cache" in tags) or is_open_qa(
-            task_description, tags
-        )
+        # 禁止 E2E 缓存的场景
+        forbid_e2e = (tags and "no-e2e-cache" in tags) or is_open_qa(task_description, tags)
 
+        # 按任务类型调整 run_options
         task_opts = options_for_task(self.run_options, task_description, tags)
         for agent in self.agents.values():
             agent.run_options = task_opts
@@ -493,16 +607,16 @@ class Orchestrator:
 
         try:
             return self._execute_task_body(
-                task_id,
-                task_description,
-                tags,
-                t0,
-                msg_count_before,
-                calls_at_start,
-                result,
-                forbid_e2e,
+                task_id, task_description, tags, t0,
+                msg_count_before, calls_at_start,
+                memories_before, state_transfers_before,
+                result, forbid_e2e,
             )
+        except Exception:
+            self.metrics.end_task()  # 异常时也要结束指标记录
+            raise
         finally:
+            # 恢复默认 run_options
             for agent in self.agents.values():
                 agent.run_options = self.run_options
 
@@ -514,27 +628,28 @@ class Orchestrator:
         t0: float,
         msg_count_before: int,
         calls_at_start: int,
+        memories_before: int,
+        state_transfers_before: int,
         result: Dict[str, Any],
         forbid_e2e: bool,
     ) -> Dict[str, Any]:
+        """任务管线的主体逻辑。"""
+
         domain_template_plan: Optional[Dict[str, Any]] = None
         domain_match_score: float = 0.0
         domain_match_from: str = ""
 
+        # ---- E2E 缓存检查 ----
         if not forbid_e2e:
             self._progress("检查是否可复用历史整题答案…")
-            e2e_hit = self._try_e2e_reuse(
-                task_id, task_description, tags, t0, msg_count_before
-            )
+            e2e_hit = self._try_e2e_reuse(task_id, task_description, tags, t0, msg_count_before)
             if e2e_hit is not None:
                 self._progress("命中整题缓存，跳过 API 调用。")
                 return e2e_hit
 
-        # Seed planner from similar strategy (replaces costly result→judge→plan path)
+        # ---- 领域计划播种：从相似策略中加载计划模板 ----
         if not is_open_qa(task_description, tags):
-            hint, hint_score, hint_id = self._load_domain_plan_hint(
-                task_description, tags
-            )
+            hint, hint_score, hint_id = self._load_domain_plan_hint(task_description, tags)
             if hint is not None:
                 domain_template_plan = hint
                 domain_match_score = hint_score
@@ -546,11 +661,10 @@ class Orchestrator:
             and self.memory_store._index is not None
             and self.memory_store._index.ntotal > 0
         ):
+            # 备选路径：通过 LLM 判断从 result 反查 strategy（默认关闭）
             try:
                 task_emb = self.embedding_engine.encode(task_description)
-                similar = self.memory_store.search_by_similarity(
-                    task_emb, limit=6, memory_type="result"
-                )
+                similar = self.memory_store.search_by_similarity(task_emb, limit=6, memory_type="result")
                 for mem, raw in similar:
                     if raw <= self.run_options.planner_judge_threshold:
                         continue
@@ -559,15 +673,10 @@ class Orchestrator:
                         continue
                     if self.run_options.enable_intent_cache_gate:
                         if not cache_intents_compatible(
-                            memory_task_description(mem),
-                            task_description,
-                            cached_tags,
-                            tags,
+                            memory_task_description(mem), task_description, cached_tags, tags,
                         ):
                             continue
-                    if self._llm_judge_similar(
-                        task_description, self._extract_task_desc(mem)
-                    ):
+                    if self._llm_judge_similar(task_description, self._extract_task_desc(mem)):
                         try:
                             payload = json.loads(mem.content)
                         except (json.JSONDecodeError, TypeError):
@@ -584,10 +693,10 @@ class Orchestrator:
             except Exception:
                 pass
 
-        # Step 1: Plan (with proactive memory suggestion)
+        # ---- Step 1：规划 ----
         plan_suggested = self._suggest_memories(task_description, limit=2, min_score=0.40)
 
-        # Inject domain-matched plan as top-priority suggestion (E2E domain match)
+        # E2E 领域匹配：将种子计划注入为最高优先级建议
         if domain_template_plan is not None:
             domain_plan_id = domain_template_plan.get("plan_id", "")
             domain_plan_mem_id = domain_template_plan.get("memory_id", "")
@@ -619,8 +728,14 @@ class Orchestrator:
             from_agent="orchestrator",
             to_agent="planner",
         )
-        plan = self.planner.execute_task(plan_msg.params)
-        self.scheduler.send_response(plan_msg, result=plan)
+        if self.run_options.enable_message_dispatch:
+            responses = self.planner.process_pending_messages()
+            plan = responses[0].result if responses else self.planner._generate_fallback_plan(
+                task_description, task_id
+            )
+        else:
+            plan = self.planner.execute_task(plan_msg.params)
+            self.scheduler.send_response(plan_msg, result=plan)
         result["steps"]["plan"] = plan
         if plan.get("llm_skipped"):
             result["llm_calls_skipped"] = result.get("llm_calls_skipped", 0) + 1
@@ -634,22 +749,19 @@ class Orchestrator:
                 f"累计 API {self._llm_calls() - calls_at_start} 次）"
             )
 
-        # Track domain match (E2E partial reuse: plan template from cache, Summarizer re-runs)
+        # 跟踪领域匹配
         if domain_template_plan is not None:
             result["_e2e_domain_match"] = True
             result["_e2e_domain_score"] = round(domain_match_score, 3)
             result["_e2e_domain_from"] = domain_match_from
 
-        # Build dependency levels from plan subtasks
+        # ---- 构建依赖层级并规范化子任务 ----
         subtasks = plan.get("subtasks", [])
-        # Normalize: LLM prompt uses "role", code expects "agent_role"
         for st in subtasks:
             if "agent_role" not in st and "role" in st:
                 st["agent_role"] = st["role"]
 
-        # AgentDropout: skip executor when template fill score is high enough.
-        # The summarizer can synthesize directly from retrieval results without
-        # the intermediate executor processing step. Saves 1 LLM call per task.
+        # ---- AgentDropout：模板填入分足够高时跳过 Executor ----
         template_score = plan.get("_template_score", 0)
         intent_blocks_drop = (
             self.run_options.enable_intent_cache_gate
@@ -664,7 +776,7 @@ class Orchestrator:
             executor_steps = {s["step"] for s in subtasks if s.get("agent_role") == "executor"}
             if executor_steps:
                 subtasks = [s for s in subtasks if s.get("agent_role") != "executor"]
-                # Rewire summarizer deps: replace executor steps with retriever steps
+                # 重连 Summarizer 依赖：将 Executor 步骤替换为 Retriever 步骤
                 retriever_steps = {s["step"] for s in subtasks if s.get("agent_role") == "retriever"}
                 for s in subtasks:
                     if s.get("agent_role") == "summarizer":
@@ -680,7 +792,7 @@ class Orchestrator:
         retrieval_refs: List[str] = []
         execution_refs: List[str] = []
 
-        # Execute subtasks level by level; within each level, run in parallel
+        # ---- Step 2-4：按依赖层级执行子任务 ----
         for level in levels:
             level_retrievers = [s for s in level if s.get("agent_role") == "retriever"]
             level_executors = [s for s in level if s.get("agent_role") == "executor"]
@@ -689,19 +801,14 @@ class Orchestrator:
 
             all_level_tasks = level_retrievers + level_executors + level_others + level_summarizers
 
-            # Run retriever → executor → summarizer within each level so summarizer
-            # always sees completed upstream results (avoids parallel race).
+            # 同层内按 retriever → executor → summarizer 顺序执行，
+            # 确保 Summarizer 始终看到已完成的上游结果（避免并行竞态）
             for phase_roles in ("retriever", "executor", "summarizer"):
-                phase_tasks = [
-                    s for s in all_level_tasks if s.get("agent_role") == phase_roles
-                ]
+                phase_tasks = [s for s in all_level_tasks if s.get("agent_role") == phase_roles]
                 if not phase_tasks:
                     continue
                 phase_cn = {"retriever": "② 检索", "executor": "③ 执行", "summarizer": "④ 总结"}
-                self._progress(
-                    f"{phase_cn.get(phase_roles, phase_roles)}："
-                    f"{len(phase_tasks)} 个子任务…"
-                )
+                self._progress(f"{phase_cn.get(phase_roles, phase_roles)}：{len(phase_tasks)} 个子任务…")
                 if len(phase_tasks) == 1:
                     for subtask in phase_tasks:
                         r = self._execute_subtask(
@@ -718,9 +825,8 @@ class Orchestrator:
                         elif r["role"] == "summarizer":
                             result["steps"]["summary"] = r["result"]
                 else:
-                    with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=len(phase_tasks)
-                    ) as pool:
+                    # 多子任务并行执行
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(phase_tasks)) as pool:
                         futures = {
                             pool.submit(
                                 self._execute_subtask, st, task_id, task_description,
@@ -748,39 +854,43 @@ class Orchestrator:
 
         result["elapsed_ms"] = (time.time() - t0) * 1000
 
-        # Record LLM usage from API
+        # ---- 记录指标 ----
+
+        # LLM 用量（来自 API 响应）
         llm_stats = self.llm.get_usage_stats()
         self.metrics.record_llm_usage(
             prompt_tokens=llm_stats["total_prompt_tokens"],
             completion_tokens=llm_stats["total_completion_tokens"],
             cached_tokens=llm_stats["total_cached_tokens"],
         )
+        # 记录 LLM 调用次数（last_elapsed_ms 反映最后一次调用）
+        calls_this_task = max(0, self._llm_calls() - calls_at_start)
+        if calls_this_task > 0:
+            self.metrics.record_llm_call(elapsed_ms=self.llm.last_elapsed_ms)
 
-        # Record all communication since start
-        new_msgs = self.message_bus._history[msg_count_before:]
-        for msg in new_msgs:
-            self.metrics.record_message(
-                token_count=msg.estimated_token_count(),
-                text_token_count=msg.text_token_count(),
-                char_count=len(str(msg.to_dict())),
-            )
+        # 通信记录（仅本次任务的消息）
+        self._record_communication(since_index=msg_count_before)
 
-        # Record state transfers
+        # 状态传输记录（本次任务的增量）
         state_stats = self.state_bus.get_stats()
-        for _ in range(state_stats["transfer_count"]):
+        transfers_this_task = max(0, state_stats["total_transfers"] - state_transfers_before)
+        for _ in range(transfers_this_task):
             self.metrics.record_state_transfer(
                 int(state_stats.get("avg_packet_size_bytes", 384 * 4)),
                 state_stats.get("avg_generation_ms", 0),
             )
 
-        # Record memory operations
+        # 记忆操作
         for subtask_result in retrieval_results.values():
-            self.metrics.record_memory_query(
-                hits=subtask_result.get("memory_hit_count", 0),
-                cross_task=subtask_result.get("memory_hit_count", 0),
-            )
+            mem_hits = subtask_result.get("memory_hits", [])
+            proactive_count = sum(1 for h in mem_hits if h.get("source") == "proactive_suggestion")
+            cross_task_count = max(0, len(mem_hits) - proactive_count)
+            self.metrics.record_memory_query(hits=len(mem_hits), cross_task=cross_task_count)
+        memories_after = self.memory_store.get_stats()["total_memories"]
+        for _ in range(max(0, memories_after - memories_before)):
+            self.metrics.record_memory_store()
 
-        # SafeSieve-lite: feedback on strategy template reuse quality
+        # ---- SafeSieve-lite：策略模板复用质量反馈 ----
         plan_step = result.get("steps", {}).get("plan", {})
         strategy_id = plan_step.get("_source_strategy_id") or plan_step.get("_reused_from")
         if (
@@ -799,12 +909,7 @@ class Orchestrator:
             try:
                 if summary_step:
                     v, _, _ = validate_task(
-                        {
-                            "task_id": task_id,
-                            "description": task_description,
-                            "tags": tags or [],
-                            "expected_topics": [],
-                        },
+                        {"task_id": task_id, "description": task_description, "tags": tags or [], "expected_topics": []},
                         {"steps": {"summary": summary_step}},
                         encode_fn=self.embedding_engine.encode,
                         pass_threshold=0.65,
@@ -821,48 +926,53 @@ class Orchestrator:
         self.metrics.end_task()
         return result
 
-    def execute_task_text_mode(self, task_id: str, task_description: str, tags: List[str] = None) -> Dict[str, Any]:
-        """Execute a task using text-based communication (baseline for comparison).
+    # ============================================================
+    # 文本模式
+    # ============================================================
 
-        In text mode, agents communicate via natural language instead of
-        structured protocol, and no non-text state passing is used.
+    def execute_task_text_mode(self, task_id: str, task_description: str, tags: List[str] = None) -> Dict[str, Any]:
+        """以文本模式执行任务（基线对照）。
+
+        文本模式下 Agent 通过自然语言通信，不使用结构化协议和非文本状态传递。
         """
         original_mode = self.mode
         self.mode = "text"
 
-        # Override agent modes to text
         for agent in self.agents.values():
             agent.use_structured_protocol = False
 
         result = self.execute_task(task_id, task_description, tags)
 
-        # Restore
         self.mode = original_mode
         for agent in self.agents.values():
             agent.use_structured_protocol = (original_mode == "structured")
 
         return result
 
-    def _record_communication(self) -> None:
-        """Record communication metrics from all messages in the bus."""
+    # ============================================================
+    # 指标记录
+    # ============================================================
+
+    def _record_communication(self, since_index: int = 0) -> None:
+        """记录自 since_index 以来的消息通信指标。"""
         history = self.message_bus._history
-        for msg in history:
+        for msg in history[since_index:]:
             self.metrics.record_message(
                 token_count=msg.estimated_token_count(),
                 text_token_count=msg.text_token_count(),
                 char_count=len(str(msg.to_dict())),
             )
 
-    def _count_messages_since(self, start_idx: int) -> int:
-        """Count new messages since a given index."""
-        return len(self.message_bus._history) - start_idx
+    # ============================================================
+    # 任务组与对比实验
+    # ============================================================
 
     def execute_task_group(
         self, tasks: List[Dict[str, Any]], group_name: str = "default"
     ) -> List[Dict[str, Any]]:
-        """Execute a group of correlated tasks sequentially.
+        """顺序执行一组关联任务。
 
-        Tasks within a group can reuse memories from previous tasks.
+        组内任务可复用之前任务的记忆（跨任务记忆复用）。
         """
         results = []
         for task in tasks:
@@ -877,11 +987,14 @@ class Orchestrator:
     def run_comparison_experiment(
         self, tasks: List[Dict[str, Any]], group_name: str
     ) -> ComparisonReport:
-        """Run the same tasks in both modes and compare results.
+        """在两种模式下运行相同任务并对比结果。
 
-        This is the core experiment for validating the system's improvements.
+        验证系统改进的核心实验方法：
+        1. 结构化模式运行 → 收集指标
+        2. 文本模式运行 → 收集指标
+        3. 生成 ComparisonReport
         """
-        # Run in structured mode
+        # 结构化模式
         self.mode = "structured"
         for agent in self.agents.values():
             agent.use_structured_protocol = True
@@ -891,15 +1004,12 @@ class Orchestrator:
 
         structured_results = self.execute_task_group(tasks, f"{group_name}_structured")
 
-        # Collect structured metrics
         structured_msg_count = self.message_bus.message_count
         structured_tokens = self.message_bus.structured_token_count
-        structured_latency = sum(
-            r.get("elapsed_ms", 0) for r in structured_results
-        )
+        structured_latency = sum(r.get("elapsed_ms", 0) for r in structured_results)
         structured_state_bytes = self.state_bus.get_stats().get("total_data_bytes", 0)
 
-        # Run in text mode
+        # 文本模式
         self.mode = "text"
         for agent in self.agents.values():
             agent.use_structured_protocol = False
@@ -907,15 +1017,12 @@ class Orchestrator:
         self.state_bus.clear()
         self.metrics.clear()
 
-        # Run the text equivalent
         text_results = self.execute_task_group(tasks, f"{group_name}_text")
 
         text_msg_count = self.message_bus.message_count
         text_tokens = self.message_bus.text_token_count
-        text_latency = sum(
-            r.get("elapsed_ms", 0) for r in text_results
-        )
-        text_state_bytes = 0  # No state transfer in text mode
+        text_latency = sum(r.get("elapsed_ms", 0) for r in text_results)
+        text_state_bytes = 0  # 文本模式无状态传递
 
         report = ComparisonReport(
             task_group=group_name,
@@ -930,15 +1037,19 @@ class Orchestrator:
         )
         self.metrics.add_comparison(report)
 
-        # Restore structured mode
+        # 恢复结构化模式
         self.mode = "structured"
         for agent in self.agents.values():
             agent.use_structured_protocol = True
 
         return report
 
+    # ============================================================
+    # 系统状态与清理
+    # ============================================================
+
     def get_system_stats(self) -> Dict[str, Any]:
-        """Get comprehensive system statistics."""
+        """获取综合系统统计信息。"""
         return {
             "scheduler": self.scheduler.get_statistics(),
             "memory": self.memory_store.get_stats(),
@@ -951,11 +1062,20 @@ class Orchestrator:
         }
 
     def print_system_status(self) -> str:
-        """Generate a human-readable system status report."""
+        """生成人类可读的系统状态报告。"""
         stats = self.get_system_stats()
         mem = stats["memory"]
         se = stats["state_exchange"]
         sch = stats["scheduler"]
+
+        agent_lines = []
+        for agent_id, info in self.registry.list_agents().items():
+            agent_lines.append(
+                f"    {agent_id} [{info.role}] status={info.status} "
+                f"sent={info.messages_sent} recv={info.messages_received}"
+            )
+        planner_ids = self.registry.find_by_role("planner")
+        retriever_ids = self.registry.find_by_role("retriever")
 
         lines = [
             "=" * 60,
@@ -963,17 +1083,25 @@ class Orchestrator:
             "=" * 60,
             f"  Mode: {self.mode}",
             f"  Agents: {sch['agents']}",
+            f"    Planners: {planner_ids}",
+            f"    Retrievers: {retriever_ids}",
+            f"  Active Agent Details:",
+        ] + agent_lines + [
             f"  Total Messages: {sch['total_messages']}",
             f"  Structured Tokens: {sch['structured_tokens']}",
             f"  Text Equivalent Tokens: {sch['text_equivalent_tokens']}",
             f"  Token Savings: {sch['token_savings_pct']:.1f}%",
+            f"  Tasks Queued: {sch.get('tasks_queued', 0)}",
+            f"  Tasks Completed: {sch.get('tasks_completed', 0)}",
+            f"  Scheduler Metrics: {self.scheduler.get_metrics()}",
             "",
             "  --- Shared Memory ---",
             f"  Total Memories: {mem['total_memories']}",
             f"  Vector Index Size: {mem['vector_index_size']}",
             f"  Total Accesses: {mem['total_accesses']}",
+            f"  Hit Rate: {mem.get('hit_rate', 0):.2%}",
             f"  By Type: {mem.get('by_type', {})}",
-            f"  By Topic: {mem.get('by_topic', {})}",
+            f"  By Agent: {mem.get('by_agent', {})}",
             "",
             "  --- State Exchange ---",
             f"  Total Transfers: {se['transfer_count']}",
@@ -985,7 +1113,7 @@ class Orchestrator:
         return "\n".join(lines)
 
     def cleanup(self) -> None:
-        """Clean up resources."""
+        """清理资源：重置注册中心、消息总线、调度器和指标。"""
         self.registry = AgentRegistry()
         self.message_bus = MessageBus()
         self.scheduler = Scheduler(self.registry, self.message_bus)

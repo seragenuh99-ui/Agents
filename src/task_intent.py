@@ -1,4 +1,16 @@
-"""Task intent detection for safe cross-task cache reuse."""
+"""任务意图检测 — 安全跨任务缓存复用门控。
+
+意图分类体系：
+- TaskIntent 枚举：COMPARE / POLICY / COMPLIANCE / VULNERABILITY / REVIEW / ANALYZE / GENERAL
+- 基于描述文本关键词 + 标签匹配的确定性分类
+- 严格意图（COMPARE/POLICY/COMPLIANCE/VULNERABILITY）不允许跨意图缓存复用
+
+缓存门控函数：
+- cache_intents_compatible(): 检查两个任务是否可以安全共享缓存
+- requires_fresh_synthesis(): 判断任务是否必须全新生成（不能复用 E2E/摘要缓存）
+- blocks_executor_dropout(): 判断任务是否必须保留执行器（不能跳过计算步骤）
+- is_open_qa(): 判断是否为开放问答（跳演示 KB、更丰富的摘要）
+"""
 
 from __future__ import annotations
 
@@ -6,15 +18,28 @@ from enum import Enum
 from typing import List, Optional, Sequence
 
 
-class TaskIntent(str, Enum):
-    COMPARE = "compare"
-    POLICY = "policy"
-    COMPLIANCE = "compliance"
-    VULNERABILITY = "vulnerability"
-    REVIEW = "review"
-    ANALYZE = "analyze"
-    GENERAL = "general"
+# ═══════════════════════════════════════════════════════════════════════════════
+# TaskIntent — 任务意图枚举
+# ═══════════════════════════════════════════════════════════════════════════════
 
+class TaskIntent(str, Enum):
+    """任务意图分类，用于缓存策略决策。
+
+    严格意图（STRICT）：缓存复用必须完全匹配，不能跨意图共享。
+    宽松意图（GENERAL/ANALYZE/REVIEW）：可跨意图缓存复用。
+    """
+    COMPARE = "compare"           # 对比分析类
+    POLICY = "policy"             # 政策/法规类
+    COMPLIANCE = "compliance"     # 合规框架类（SOC2/ISO27001）
+    VULNERABILITY = "vulnerability"  # 安全漏洞类
+    REVIEW = "review"             # 评审/审计类
+    ANALYZE = "analyze"           # 分析/研究/解释类
+    GENERAL = "general"           # 通用类
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 意图检测标记词
+# ═══════════════════════════════════════════════════════════════════════════════
 
 _COMPARE_MARKERS = (
     "compare ",
@@ -66,6 +91,7 @@ _REVIEW_MARKERS = (
     "vulnerability assessment",
 )
 
+# 严格意图集合 — 缓存复用必须完全匹配意图
 _STRICT_INTENTS = frozenset(
     {
         TaskIntent.COMPARE,
@@ -75,7 +101,7 @@ _STRICT_INTENTS = frozenset(
     }
 )
 
-# Benchmark suite domain tags — not open-ended Q&A
+# 基准测试领域标签 — 不是开放问答
 _BENCHMARK_DOMAIN_TAGS = frozenset(
     {
         "energy",
@@ -95,21 +121,36 @@ _BENCHMARK_DOMAIN_TAGS = frozenset(
 )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 开放问答检测
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def is_open_qa(
     description: str, tags: Optional[Sequence[str]] = None
 ) -> bool:
-    """Open-ended questions (e.g. custom REPL) — skip demo KB, richer summarizer."""
+    """检测是否为开放问答（非基准测试任务）。
+
+    判定规则：
+    1. 标签含 "custom" 或 "open_qa" → 开放问答
+    2. 中文文本且无基准测试领域标签 → 开放问答
+    3. 含日常生活标记词（推荐、美食、旅游等）且无基准标签 → 开放问答
+
+    开放问答的特殊处理：
+    - 不使用演示知识库
+    - 更丰富的证据和摘要 token 预算
+    - 禁用计划缓存（防止不相关任务污染）
+    """
     tag_set = {t.lower() for t in (tags or [])}
     if "custom" in tag_set or "open_qa" in tag_set:
         return True
     text = description or ""
     if not text.strip():
         return False
-    # Chinese/general ask without benchmark domain tags
-    has_cjk = any("\u4e00" <= c <= "\u9fff" for c in text)
+    # 中文文本且不在基准领域
+    has_cjk = any("一" <= c <= "鿿" for c in text)
     if has_cjk and not (tag_set & _BENCHMARK_DOMAIN_TAGS):
         return True
-    # Obvious lifestyle / travel / food asks in English
+    # 英文日常生活标记词
     open_markers = (
         "recommend",
         "what to eat",
@@ -128,10 +169,18 @@ def is_open_qa(
     return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 意图检测
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def detect_intent(
     description: str, tags: Optional[Sequence[str]] = None
 ) -> TaskIntent:
-    """Classify task intent from description and optional tags."""
+    """从描述文本和标签中分类任务意图。
+
+    检测顺序（优先级从高到低）：
+    标签 > COMPARE > POLICY > COMPLIANCE > VULNERABILITY > REVIEW > ANALYZE > GENERAL
+    """
     text = (description or "").lower()
     tag_set = {t.lower() for t in (tags or [])}
 
@@ -165,13 +214,23 @@ def detect_intent(
     return TaskIntent.GENERAL
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 缓存复用门控
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def cache_intents_compatible(
     source_description: str,
     target_description: str,
     source_tags: Optional[Sequence[str]] = None,
     target_tags: Optional[Sequence[str]] = None,
 ) -> bool:
-    """Return False when reusing cache would mix incompatible task types."""
+    """检查两个任务的意图是否兼容缓存复用。
+
+    规则：
+    - 如果源或目标是严格意图（COMPARE/POLICY/COMPLIANCE/VULNERABILITY），
+      则必须意图完全匹配
+    - 宽松意图之间可自由复用
+    """
     src = detect_intent(source_description, source_tags)
     tgt = detect_intent(target_description, target_tags)
     if src in _STRICT_INTENTS or tgt in _STRICT_INTENTS:
@@ -182,7 +241,12 @@ def cache_intents_compatible(
 def requires_fresh_synthesis(
     description: str, tags: Optional[Sequence[str]] = None
 ) -> bool:
-    """Tasks that must not reuse a prior summary verbatim (E2E / summarizer cache)."""
+    """判断任务是否必须全新生成（不能复用 E2E 或摘要缓存）。
+
+    以下任务需要全新合成：
+    - 开放问答（避免不相关缓存污染）
+    - 对比分析、合规、评审类（结论不能跨任务复用）
+    """
     if is_open_qa(description, tags):
         return True
     return detect_intent(description, tags) in (
@@ -195,7 +259,12 @@ def requires_fresh_synthesis(
 def blocks_executor_dropout(
     description: str, tags: Optional[Sequence[str]] = None
 ) -> bool:
-    """Keep executor for tasks that need a dedicated synthesis pass."""
+    """判断任务是否必须保留执行器（不能跳过计算步骤）。
+
+    以下任务需要执行器：
+    - 开放问答（需要整理检索要点）
+    - 评审类、合规类（需要专门合成步骤）
+    """
     if is_open_qa(description, tags):
         return True
     return detect_intent(description, tags) in (
@@ -204,10 +273,17 @@ def blocks_executor_dropout(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 辅助函数
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def memory_task_description(mem) -> str:
-    """Best-effort task text from a memory unit."""
+    """从记忆单元中尽力提取任务描述文本。
+
+    处理前缀格式：Summary: / Plan: / Execution: / Retrieval:
+    """
     topic = getattr(mem, "task_topic", "") or ""
     for prefix in ("Summary: ", "Plan: ", "Execution: ", "Retrieval: "):
         if topic.startswith(prefix):
-            return topic[len(prefix) :]
+            return topic[len(prefix):]
     return topic

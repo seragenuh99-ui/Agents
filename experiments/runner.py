@@ -88,8 +88,13 @@ def run_full_experiment(
         print(f"    Latency: {structured_elapsed:.2f}s")
 
         for i, r in enumerate(structured_results):
-            summary = r.get("steps", {}).get("summary", {}).get("summary", "N/A")
-            print(f"    Task {i+1} result: {summary[:120]}...")
+            step_summary = r.get("steps", {}).get("summary", {})
+            summary = step_summary.get("summary", step_summary) if isinstance(step_summary, dict) else step_summary
+            if isinstance(summary, dict):
+                text = summary.get("conclusion", "") or "; ".join(summary.get("key_findings", [])[:2]) or str(summary)
+            else:
+                text = str(summary or "N/A")
+            print(f"    Task {i+1} result: {text[:120]}...")
 
         # Step 2: Text communication mode
         print(f"\n  [2/2] Running in TEXT communication mode...")
@@ -111,8 +116,13 @@ def run_full_experiment(
         print(f"    Latency: {text_elapsed:.2f}s")
 
         for i, r in enumerate(text_results):
-            summary = r.get("steps", {}).get("summary", {}).get("summary", "N/A")
-            print(f"    Task {i+1} result: {summary[:120]}...")
+            step_summary = r.get("steps", {}).get("summary", {})
+            summary = step_summary.get("summary", step_summary) if isinstance(step_summary, dict) else step_summary
+            if isinstance(summary, dict):
+                text = summary.get("conclusion", "") or "; ".join(summary.get("key_findings", [])[:2]) or str(summary)
+            else:
+                text = str(summary or "N/A")
+            print(f"    Task {i+1} result: {text[:120]}...")
 
         # Step 3: Comparison
         report = ComparisonReport(
@@ -212,9 +222,14 @@ def run_continuous_tasks(
         mem_stats = orchestrator.memory_store.get_stats()
         print(f"    Memories: {mem_stats['total_memories']}, "
               f"Vector Index: {mem_stats['vector_index_size']}")
-        summary = result.get("steps", {}).get("summary", {}).get("summary", "")
+        step_summary = result.get("steps", {}).get("summary", {})
+        summary = step_summary.get("summary", step_summary) if isinstance(step_summary, dict) else step_summary
         if summary:
-            print(f"    Result: {summary[:120]}...")
+            if isinstance(summary, dict):
+                text = summary.get("conclusion", "") or "; ".join(summary.get("key_findings", [])[:2]) or str(summary)
+            else:
+                text = str(summary)
+            print(f"    Result: {text[:120]}...")
 
     reporter = Reporter(orchestrator.metrics)
     print("\n" + reporter.print_summary())

@@ -1,7 +1,16 @@
-"""Performance metrics collection for multi-agent collaboration.
+"""性能指标收集 — 多智能体协作效率度量。
 
-Tracks: message count, token/char overhead, non-text state transfers,
-task latency, memory hit rate, and overall performance improvement.
+追踪维度：
+- 通信：消息数、结构化/文本 token 对比、通信字符数
+- 状态传递：非文本状态传输次数、数据量、生成耗时
+- 记忆：查询次数、命中率、跨任务记忆复用
+- LLM 用量：API 调用次数、token 消耗、缓存命中率
+- 延迟：端到端耗时、平均消息延迟
+
+核心数据结构：
+- TaskMetrics：单任务指标
+- ComparisonReport：结构化 vs 文本模式对比
+- MetricsCollector：指标收集与聚合
 """
 
 from __future__ import annotations
@@ -11,75 +20,102 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TaskMetrics — 单任务执行指标
+# ═══════════════════════════════════════════════════════════════════════════════
+
 @dataclass
 class TaskMetrics:
-    """Metrics for a single task execution."""
+    """单次任务执行的完整指标。
+
+    分为五个维度：
+    - 基础信息：task_id, description, mode, 时间戳
+    - 通信指标：消息数、token 数、字符数
+    - 状态传递：传输次数、数据量
+    - 记忆指标：查询/命中/存储
+    - LLM 用量：API token 消耗、缓存命中
+    """
+
     task_id: str = ""
     task_description: str = ""
-    mode: str = "structured"  # "structured" or "text"
+    mode: str = "structured"  # "structured" 或 "text"
     start_time: float = 0.0
     end_time: float = 0.0
 
-    # Communication metrics
+    # ── 通信指标 ──
     messages_sent: int = 0
     messages_received: int = 0
-    structured_token_count: int = 0
-    text_equivalent_token_count: int = 0
+    structured_token_count: int = 0       # 结构化协议 token 数
+    text_equivalent_token_count: int = 0  # 等效文本协议 token 数
     communication_char_count: int = 0
 
-    # State transfer metrics
+    # ── 状态传递指标 ──
     state_transfers: int = 0
     state_data_bytes: int = 0
     state_generation_ms: float = 0.0
 
-    # Memory metrics
+    # ── 记忆指标 ──
     memory_queries: int = 0
     memory_hits: int = 0
     memory_hit_rate: float = 0.0
     memories_stored: int = 0
     cross_task_memories_used: int = 0
 
-    # Timing
+    # ── 时间与 LLM 调用 ──
     total_elapsed_ms: float = 0.0
     llm_call_count: int = 0
     llm_total_ms: float = 0.0
 
-    # Real LLM API usage (from API response)
+    # ── 真实 LLM API 用量（来自 API 响应）──
     llm_prompt_tokens: int = 0
     llm_completion_tokens: int = 0
-    llm_cached_tokens: int = 0
+    llm_cached_tokens: int = 0          # DeepSeek KV-cache 命中 token 数
+
+    # ── 计算属性 ──
 
     @property
     def llm_cache_hit_pct(self) -> float:
+        """LLM 提示缓存命中率（DeepSeek 前缀缓存）。"""
         if self.llm_prompt_tokens == 0:
             return 0.0
         return self.llm_cached_tokens / self.llm_prompt_tokens * 100
 
     @property
     def token_savings_pct(self) -> float:
+        """结构化协议相比文本协议的 token 节省率。"""
         if self.text_equivalent_token_count == 0:
             return 0.0
         return (1 - self.structured_token_count / self.text_equivalent_token_count) * 100
 
     @property
     def avg_message_latency_ms(self) -> float:
+        """平均每条消息的延迟。"""
         if self.messages_sent == 0:
             return 0.0
         return self.total_elapsed_ms / self.messages_sent
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ComparisonReport — 模式对比报告
+# ═══════════════════════════════════════════════════════════════════════════════
+
 @dataclass
 class ComparisonReport:
-    """Comparison between structured protocol mode and text mode."""
+    """结构化协议模式 vs 文本模式的对比报告。
+
+    对比维度：消息数、token 数、延迟、状态数据量。
+    计算属性给出节省百分比。
+    """
+
     task_group: str = ""
 
-    # Structured mode
+    # 结构化模式
     structured_messages: int = 0
     structured_tokens: int = 0
     structured_latency_ms: float = 0.0
     structured_state_bytes: int = 0
 
-    # Text mode
+    # 文本模式
     text_messages: int = 0
     text_tokens: int = 0
     text_latency_ms: float = 0.0
@@ -87,17 +123,20 @@ class ComparisonReport:
 
     @property
     def token_reduction_pct(self) -> float:
+        """结构化协议 token 减少百分比。"""
         if self.text_tokens == 0:
             return 0.0
         return (1 - self.structured_tokens / self.text_tokens) * 100
 
     @property
     def latency_reduction_pct(self) -> float:
+        """结构化协议延迟减少百分比。"""
         if self.text_latency_ms == 0:
             return 0.0
         return (1 - self.structured_latency_ms / self.text_latency_ms) * 100
 
     def to_dict(self) -> Dict[str, Any]:
+        """导出为字典，用于 JSON 序列化。"""
         return {
             "task_group": self.task_group,
             "token_reduction_pct": round(self.token_reduction_pct, 2),
@@ -117,15 +156,29 @@ class ComparisonReport:
         }
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# MetricsCollector — 指标收集器
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class MetricsCollector:
-    """Collects and aggregates metrics during task execution."""
+    """任务执行期间的指标收集与聚合。
+
+    生命周期：
+    1. start_task() → 开始记录单任务指标
+    2. record_*() → 执行期间递增各类计数
+    3. end_task() → 结算并归档到 _task_history
+    4. get_aggregate_metrics() → 跨任务聚合统计
+    """
 
     def __init__(self):
         self._current_task: Optional[TaskMetrics] = None
         self._task_history: List[TaskMetrics] = []
         self._comparisons: List[ComparisonReport] = []
 
+    # ── 任务生命周期 ──
+
     def start_task(self, task_id: str, description: str, mode: str = "structured") -> None:
+        """开始追踪一个新任务。"""
         self._current_task = TaskMetrics(
             task_id=task_id,
             task_description=description,
@@ -134,6 +187,7 @@ class MetricsCollector:
         )
 
     def end_task(self) -> Optional[TaskMetrics]:
+        """结束当前任务追踪，计算延迟和命中率，归档到历史。"""
         if self._current_task:
             self._current_task.end_time = time.time()
             self._current_task.total_elapsed_ms = (
@@ -149,7 +203,10 @@ class MetricsCollector:
             return task
         return None
 
+    # ── 增量记录方法 ──
+
     def record_message(self, token_count: int, text_token_count: int, char_count: int) -> None:
+        """记录一条消息的通信开销。"""
         if self._current_task:
             self._current_task.messages_sent += 1
             self._current_task.structured_token_count += token_count
@@ -157,38 +214,50 @@ class MetricsCollector:
             self._current_task.communication_char_count += char_count
 
     def record_state_transfer(self, data_bytes: int, generation_ms: float) -> None:
+        """记录一次非文本状态传递。"""
         if self._current_task:
             self._current_task.state_transfers += 1
             self._current_task.state_data_bytes += data_bytes
             self._current_task.state_generation_ms += generation_ms
 
     def record_memory_query(self, hits: int, cross_task: int = 0) -> None:
+        """记录一次记忆查询及命中数。"""
         if self._current_task:
             self._current_task.memory_queries += 1
             self._current_task.memory_hits += hits
             self._current_task.cross_task_memories_used += cross_task
 
     def record_memory_store(self) -> None:
+        """记录一次记忆存储。"""
         if self._current_task:
             self._current_task.memories_stored += 1
 
     def record_llm_call(self, elapsed_ms: float) -> None:
+        """记录一次 LLM 调用及其耗时。"""
         if self._current_task:
             self._current_task.llm_call_count += 1
             self._current_task.llm_total_ms += elapsed_ms
 
     def record_llm_usage(self, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -> None:
-        """Record real token usage from LLM API response."""
+        """记录 LLM API 返回的真实 token 用量（含缓存命中 token）。"""
         if self._current_task:
             self._current_task.llm_prompt_tokens += prompt_tokens
             self._current_task.llm_completion_tokens += completion_tokens
             self._current_task.llm_cached_tokens += cached_tokens
 
     def add_comparison(self, report: ComparisonReport) -> None:
+        """添加一条模式对比报告。"""
         self._comparisons.append(report)
 
+    # ── 聚合查询 ──
+
     def get_aggregate_metrics(self) -> Dict[str, Any]:
-        """Get aggregate metrics across all tasks."""
+        """跨所有任务计算聚合指标。
+
+        Returns:
+            包含总量、均值、模式对比、LLM 用量等维度的字典。
+            如无历史任务则返回空字典。
+        """
         if not self._task_history:
             return {}
 
@@ -253,6 +322,7 @@ class MetricsCollector:
         }
 
     def get_task_details(self) -> List[Dict[str, Any]]:
+        """获取每个任务的详细信息列表。"""
         return [
             {
                 "task_id": t.task_id,
@@ -272,6 +342,7 @@ class MetricsCollector:
         ]
 
     def clear(self) -> None:
+        """清空所有指标（用于测试复位）。"""
         self._current_task = None
         self._task_history.clear()
         self._comparisons.clear()

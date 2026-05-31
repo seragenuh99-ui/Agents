@@ -33,6 +33,7 @@ class CountingMockLLM:
         self.structured_calls = 0
         self.chat_history: List[List[Dict]] = []
         self.structured_history: List[List[Dict]] = []
+        self.last_elapsed_ms = 0.0
 
     def chat(self, messages, **kwargs):
         self.chat_calls += 1
