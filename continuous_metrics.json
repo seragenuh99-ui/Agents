@@ -1,0 +1,181 @@
+{
+  "generated_at": 1780221935.8253043,
+  "aggregate": {
+    "total_tasks": 10,
+    "total_messages": 80,
+    "total_structured_tokens": 95515,
+    "total_text_equivalent_tokens": 91490,
+    "overall_token_savings_pct": -4.399387911247121,
+    "total_latency_ms": 687.44,
+    "avg_task_latency_ms": 68.74,
+    "total_state_transfers": 6,
+    "total_state_data_bytes": 9216,
+    "total_memory_queries": 10,
+    "total_memory_hits": 30,
+    "memory_hit_rate": 3.0,
+    "cross_task_memories_used": 30,
+    "llm_usage": {
+      "total_prompt_tokens": 0,
+      "total_completion_tokens": 0,
+      "total_cached_tokens": 0,
+      "cache_hit_pct": 0.0
+    },
+    "mode_comparison": {
+      "structured": {
+        "task_count": 10,
+        "avg_latency_ms": 68.74,
+        "avg_tokens": 9551.5,
+        "avg_messages": 8.0
+      },
+      "text": {
+        "task_count": 0,
+        "avg_latency_ms": 0,
+        "avg_tokens": 0,
+        "avg_messages": 0
+      }
+    }
+  },
+  "tasks": [
+    {
+      "task_id": "cont_task_1",
+      "description": "Analyze the efficiency of renewable energy sources for urban deployment, considering space constrain",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 6675,
+      "text_tokens": 6273,
+      "token_savings_pct": -6.41,
+      "state_transfers": 0,
+      "memory_hits": 1,
+      "memory_hit_rate": 1.0,
+      "cross_task_memories": 1,
+      "latency_ms": 36.1
+    },
+    {
+      "task_id": "cont_task_2",
+      "description": "Compare battery storage technologies (lithium-ion, flow batteries, solid-state) for grid-scale renew",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 8368,
+      "text_tokens": 7965,
+      "token_savings_pct": -5.06,
+      "state_transfers": 2,
+      "memory_hits": 1,
+      "memory_hit_rate": 1.0,
+      "cross_task_memories": 1,
+      "latency_ms": 44.07
+    },
+    {
+      "task_id": "cont_task_3",
+      "description": "Design a hybrid renewable energy system for a medium-sized city (500k population), combining solar, ",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 9750,
+      "text_tokens": 9347,
+      "token_savings_pct": -4.31,
+      "state_transfers": 1,
+      "memory_hits": 4,
+      "memory_hit_rate": 4.0,
+      "cross_task_memories": 4,
+      "latency_ms": 76.69
+    },
+    {
+      "task_id": "cont_task_4",
+      "description": "Perform cost-benefit analysis of the hybrid system designed in the previous task, including installa",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 11231,
+      "text_tokens": 10829,
+      "token_savings_pct": -3.71,
+      "state_transfers": 0,
+      "memory_hits": 4,
+      "memory_hit_rate": 4.0,
+      "cross_task_memories": 4,
+      "latency_ms": 72.13
+    },
+    {
+      "task_id": "cont_task_5",
+      "description": "Research policy incentives and regulatory frameworks that would accelerate adoption of the proposed ",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 8033,
+      "text_tokens": 7631,
+      "token_savings_pct": -5.27,
+      "state_transfers": 0,
+      "memory_hits": 1,
+      "memory_hit_rate": 1.0,
+      "cross_task_memories": 1,
+      "latency_ms": 55.04
+    },
+    {
+      "task_id": "cont_task_6",
+      "description": "Analyze environmental impact assessment requirements for the hybrid renewable energy project.",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 11111,
+      "text_tokens": 10708,
+      "token_savings_pct": -3.76,
+      "state_transfers": 0,
+      "memory_hits": 5,
+      "memory_hit_rate": 5.0,
+      "cross_task_memories": 5,
+      "latency_ms": 86.39
+    },
+    {
+      "task_id": "cont_task_7",
+      "description": "Evaluate grid integration challenges and solutions for the hybrid renewable system.",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 10406,
+      "text_tokens": 10003,
+      "token_savings_pct": -4.03,
+      "state_transfers": 0,
+      "memory_hits": 4,
+      "memory_hit_rate": 4.0,
+      "cross_task_memories": 4,
+      "latency_ms": 79.98
+    },
+    {
+      "task_id": "cont_task_8",
+      "description": "Compare the proposed hybrid system with conventional natural gas power plant in terms of lifecycle e",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 10924,
+      "text_tokens": 10522,
+      "token_savings_pct": -3.82,
+      "state_transfers": 2,
+      "memory_hits": 4,
+      "memory_hit_rate": 4.0,
+      "cross_task_memories": 4,
+      "latency_ms": 80.69
+    },
+    {
+      "task_id": "cont_task_9",
+      "description": "Research community engagement strategies for renewable energy project deployment.",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 10765,
+      "text_tokens": 10362,
+      "token_savings_pct": -3.89,
+      "state_transfers": 1,
+      "memory_hits": 5,
+      "memory_hit_rate": 5.0,
+      "cross_task_memories": 5,
+      "latency_ms": 89.05
+    },
+    {
+      "task_id": "cont_task_10",
+      "description": "Synthesize all previous findings into a comprehensive master plan for city renewable energy transiti",
+      "mode": "structured",
+      "messages": 8,
+      "structured_tokens": 8252,
+      "text_tokens": 7850,
+      "token_savings_pct": -5.12,
+      "state_transfers": 0,
+      "memory_hits": 1,
+      "memory_hit_rate": 1.0,
+      "cross_task_memories": 1,
+      "latency_ms": 67.31
+    }
+  ],
+  "comparisons": []
+}
