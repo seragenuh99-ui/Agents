@@ -2,12 +2,15 @@
 
 多 Agent 协作诊断系统：低开销结构化通信、非文本状态传递、共享记忆复用。
 
+本仓库主分支已整理为比赛交付版，只保留源码、测试、实验脚本、关键文档、最终汇报 PPT 和 openEuler 可执行演示 bundle。
+
 ## 快速入口
 
 | 入口 | 说明 |
 |------|------|
-| `./启动实验.sh` 或双击 `启动实验.bat` | 实验汇报入口，包含控制台、答辩快测和对照实验 |
-| `./启动实验_答辩12题.sh` | 一键运行 core12，模式 1+2 对照 |
+| `DELIVERY.md` | 交付说明和检查环境运行方法 |
+| `dist/702solver_full24_demo_openeuler/702solver_full24_demo` | openEuler 可执行演示程序 |
+| `702solver_competition_results.pptx` | 最终汇报 PPT |
 | `python3 run.py` | 实验控制台，支持 benchmark、演示和模式切换 |
 | `python3 main.py demo` | 离线 mock 演示，无需 API key |
 | `python3 main.py experiment --mock` | mock LLM 完整对比实验 |
@@ -22,12 +25,13 @@ cd dist/702solver_full24_demo_openeuler
 ./702solver_full24_demo
 ```
 
-该 bundle 在 `openeuler/openeuler:24.03` 容器中构建，并已在干净 openEuler 24.03 基础镜像中通过 `--help` 冒烟验证：
+命令行验证：
 
 ```bash
-docker run --rm -v "$PWD:/app" -w /app openeuler/openeuler:24.03 \
-  dist/702solver_full24_demo_openeuler/702solver_full24_demo --help
+dist/702solver_full24_demo_openeuler/702solver_full24_demo --help
 ```
+
+该 bundle 在 `openeuler/openeuler:24.03` 容器中构建，并已在同版本基础镜像中通过验证。
 
 如需重新生成 openEuler 版可执行目录：
 
@@ -39,16 +43,13 @@ docker run --rm -v "$PWD:/app" -w /app openeuler/openeuler:24.03 \
   bash scripts/vendor_openeuler_gui_libs.sh
 ```
 
-说明：之前的 `dist/702solver_full24_demo.exe` 是 Windows 可执行文件；openEuler/Linux 检查环境请使用 `dist/702solver_full24_demo_openeuler/` 目录中的无后缀 ELF 启动文件。
-
 ## 环境与依赖
 
 ```bash
 pip install -r requirements.txt
-echo 'DEEPSEEK_API_KEY=你的密钥' >> .env
 ```
 
-测试不需要真实 LLM API key，默认使用 `MockLLM` 和确定性 hash embeddings。
+如需真实 LLM，请自行创建 `.env` 并写入 API key；交付仓库不包含密钥文件。测试默认使用 `MockLLM` 和确定性 hash embeddings，不依赖外部 API。
 
 ## 常用命令
 
@@ -71,22 +72,19 @@ python3 -m pytest tests/ -x --tb=short
 
 ```text
 702solver/
-├── main.py                  # CLI：experiment / single / chat / demo / stats
-├── run.py                   # 实验控制台入口
-├── chat.py                  # 交互式对话
-├── demo_dashboard.py        # Qt 演示仪表盘
-├── src/                     # 核心代码
-│   ├── agents/              # Planner / Retriever / Executor / Summarizer
-│   ├── memory/              # SQLite + FAISS 共享记忆
-│   ├── protocol/            # MessagePack 结构化协议
-│   ├── state/               # embedding 状态传递
-│   ├── evaluation/          # 指标与质量验证
-│   └── sandbox/             # AST 校验 + 安全执行
-├── experiments/             # 基准与对照实验脚本
-├── tests/                   # 单元与集成测试
-├── docs/                    # 架构、报告、项目记录
-├── dist/                    # 可执行交付物
-└── output/                  # 运行时结果、日志和数据库
+├── README.md
+├── DELIVERY.md
+├── 702solver_competition_results.pptx
+├── main.py
+├── run.py
+├── chat.py
+├── demo_dashboard.py
+├── src/
+├── tests/
+├── experiments/
+├── docs/
+├── scripts/
+└── dist/702solver_full24_demo_openeuler/
 ```
 
 ## 核心结果
@@ -109,6 +107,7 @@ full24 控制变量实验结果：
 |------|------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构与课程要求对照 |
 | [docs/STATUS_SUMMARY.md](docs/STATUS_SUMMARY.md) | 当前状态总览 |
-| [docs/PROJECT_RECORD.md](docs/PROJECT_RECORD.md) | 指标、实验、对话和产物记录 |
-| [docs/CURRENT_STATUS_AND_ROADMAP.md](docs/CURRENT_STATUS_AND_ROADMAP.md) | 通俗解读与后续路线 |
+| [docs/PROJECT_RECORD.md](docs/PROJECT_RECORD.md) | 指标、实验和产物记录 |
+| [docs/final_report.md](docs/final_report.md) | 最终报告 |
+| [docs/full24_controlled_comparison.md](docs/full24_controlled_comparison.md) | 24 题控制变量实验 |
 | [experiments/README.md](experiments/README.md) | 实验脚本说明 |
