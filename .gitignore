@@ -20,6 +20,13 @@ __pycache__/
 .venv/
 venv/
 
+# PyInstaller demo artifacts
+build/
+dist/*
+!dist/702solver_full24_demo.exe
+702solver_dashboard.spec
+702solver_dashboard_live.spec
+
 # IDE
 .idea/
 .vscode/
