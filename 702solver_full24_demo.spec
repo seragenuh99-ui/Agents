@@ -1,16 +1,45 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+
+ROOT = Path.cwd()
+
 
 a = Analysis(
     ['demo_dashboard.py'],
     pathex=[],
     binaries=[],
-    datas=[('output\\results\\full24_controlled_comparison.json', 'output\\results'), ('docs\\full24_controlled_comparison.md', 'docs'), ('src', 'src'), ('experiments', 'experiments'), ('run.py', '.')],
+    datas=[
+        (str(ROOT / 'output' / 'results' / 'full24_controlled_comparison.json'), 'output/results'),
+        (str(ROOT / 'docs' / 'full24_controlled_comparison.md'), 'docs'),
+        (str(ROOT / 'src'), 'src'),
+        (str(ROOT / 'experiments'), 'experiments'),
+        (str(ROOT / 'run.py'), '.'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'sentence_transformers',
+        'transformers',
+        'torch',
+        'torchvision',
+        'torchaudio',
+        'sklearn',
+        'pandas',
+        'tensorflow',
+        'PySide6.QtDBus',
+        'gi',
+        'keyring',
+        'SecretStorage',
+        'jeepney',
+        'cryptography',
+        'bcrypt',
+        'httplib2',
+        'psutil',
+    ],
     noarchive=False,
     optimize=0,
 )

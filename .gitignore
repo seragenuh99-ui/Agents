@@ -8,6 +8,10 @@ output/
 *.db.bak
 *.log
 *_benchmark_results.json
+metrics_report.json
+continuous_metrics.json
+*.inspect.ndjson
+*_project_intro/
 experiment_matrix/
 experiment_matrix_v2/
 
@@ -24,6 +28,8 @@ venv/
 build/
 dist/*
 !dist/702solver_full24_demo.exe
+!dist/702solver_full24_demo_openeuler/
+!dist/702solver_full24_demo_openeuler/**
 702solver_dashboard.spec
 702solver_dashboard_live.spec
 
