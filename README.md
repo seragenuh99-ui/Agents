@@ -1,67 +1,114 @@
 # 702solver
 
-多 Agent 协作系统：低开销通信 · 非文本状态传递 · 共享记忆复用。
+多 Agent 协作诊断系统：低开销结构化通信、非文本状态传递、共享记忆复用。
+
+## 快速入口
 
 | 入口 | 说明 |
 |------|------|
-| **`./启动实验.sh`** 或双击 **`启动实验.bat`**（Windows） | **实验汇报入口**（控制台 / 答辩快测 / 对照） |
-| **`./启动实验_答辩12题.sh`** | **一键 core12 · 模式 1+2 对照** |
-| **`python3 run.py`** | **实验控制台（benchmark / 演示 / 切换模式）** |
-| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | **系统架构 + 课程要求对照** |
-| **[docs/STATUS_SUMMARY.md](docs/STATUS_SUMMARY.md)** | **目前情况一页总览（最新数据）** |
-| **[docs/PROJECT_RECORD.md](docs/PROJECT_RECORD.md)** | 全记录：指标、实验、对话、产物 |
-| **[docs/CURRENT_STATUS_AND_ROADMAP.md](docs/CURRENT_STATUS_AND_ROADMAP.md)** | 通俗解读 + 后续优化路线 |
-| **[docs/full24_benchmark_results.md](docs/full24_benchmark_results.md)** | 24 题标准基准 |
-| **[docs/README.md](docs/README.md)** | 文档目录 |
-| **[experiments/README.md](experiments/README.md)** | 实验脚本说明 |
-| **[output/README.md](output/README.md)** | 运行时产物（JSON / 日志 / 数据库） |
+| `./启动实验.sh` 或双击 `启动实验.bat` | 实验汇报入口，包含控制台、答辩快测和对照实验 |
+| `./启动实验_答辩12题.sh` | 一键运行 core12，模式 1+2 对照 |
+| `python3 run.py` | 实验控制台，支持 benchmark、演示和模式切换 |
+| `python3 main.py demo` | 离线 mock 演示，无需 API key |
+| `python3 main.py experiment --mock` | mock LLM 完整对比实验 |
+| `python3 chat.py` | 交互式对话会话 |
 
-## 仓库结构
+## openEuler 可执行版本
 
-```
-702solver/
-├── main.py              # CLI：experiment / single / chat / demo / stats
-├── chat.py              # 交互对话（推荐入口）
-├── src/                 # 核心代码
-│   ├── agents/          # Planner, Retriever, Executor, Summarizer
-│   ├── orchestrator.py
-│   ├── memory/          # SQLite + FAISS
-│   ├── protocol/        # MessagePack 调度
-│   ├── state/           # BGE 向量状态
-│   ├── chat/            # 对话会话
-│   ├── evaluation/      # 指标与质量验证
-│   └── paths.py         # output/ 路径常量
-├── experiments/         # 基准与实验矩阵脚本
-├── tests/               # 单元与集成测试
-├── docs/                # 文档（报告、设计、归档）
-└── output/              # 生成物（勿与源码混放）
-    ├── results/         # *.json 报告
-    ├── logs/            # *.log
-    ├── databases/       # *.db 记忆库
-    ├── experiment_matrix/
-    └── experiment_matrix_v2/
+本仓库已提供面向检查环境的 openEuler 24.03 LTS-SP3 版演示程序：
+
+```bash
+cd dist/702solver_full24_demo_openeuler
+./702solver_full24_demo
 ```
 
-## 快速开始
+该 bundle 在 `openeuler/openeuler:24.03` 容器中构建，并已在干净 openEuler 24.03 基础镜像中通过 `--help` 冒烟验证：
+
+```bash
+docker run --rm -v "$PWD:/app" -w /app openeuler/openeuler:24.03 \
+  dist/702solver_full24_demo_openeuler/702solver_full24_demo --help
+```
+
+如需重新生成 openEuler 版可执行目录：
+
+```bash
+docker run --rm -v "$PWD:/app" -w /app openeuler/openeuler:24.03 \
+  bash scripts/build_openeuler_demo_bundle.sh
+
+docker run --rm -v "$PWD:/app" -w /app openeuler/openeuler:24.03 \
+  bash scripts/vendor_openeuler_gui_libs.sh
+```
+
+说明：之前的 `dist/702solver_full24_demo.exe` 是 Windows 可执行文件；openEuler/Linux 检查环境请使用 `dist/702solver_full24_demo_openeuler/` 目录中的无后缀 ELF 启动文件。
+
+## 环境与依赖
 
 ```bash
 pip install -r requirements.txt
 echo 'DEEPSEEK_API_KEY=你的密钥' >> .env
-
-python3 chat.py                                    # 对话
-python3 main.py single "你的任务描述"             # 单任务
-python3 experiments/full24_controlled_comparison.py  # 控制变量对照（推荐）
-python3 experiments/benchmark_full24.py              # 结构化子实验
 ```
 
-## 核心结果（v0.11.2，full24 控制变量实验）
+测试不需要真实 LLM API key，默认使用 `MockLLM` 和确定性 hash embeddings。
+
+## 常用命令
+
+```bash
+python3 run.py
+python3 run.py --mode 2 --suite core12
+python3 run.py --mode 1,2 --suite full24
+python3 run.py --mode 2 --ask "你的问题"
+
+python3 main.py demo
+python3 main.py experiment --mock
+python3 main.py single "任务描述"
+python3 chat.py
+
+python3 -m pytest tests/ -v
+python3 -m pytest tests/ -x --tb=short
+```
+
+## 仓库结构
+
+```text
+702solver/
+├── main.py                  # CLI：experiment / single / chat / demo / stats
+├── run.py                   # 实验控制台入口
+├── chat.py                  # 交互式对话
+├── demo_dashboard.py        # Qt 演示仪表盘
+├── src/                     # 核心代码
+│   ├── agents/              # Planner / Retriever / Executor / Summarizer
+│   ├── memory/              # SQLite + FAISS 共享记忆
+│   ├── protocol/            # MessagePack 结构化协议
+│   ├── state/               # embedding 状态传递
+│   ├── evaluation/          # 指标与质量验证
+│   └── sandbox/             # AST 校验 + 安全执行
+├── experiments/             # 基准与对照实验脚本
+├── tests/                   # 单元与集成测试
+├── docs/                    # 架构、报告、项目记录
+├── dist/                    # 可执行交付物
+└── output/                  # 运行时结果、日志和数据库
+```
+
+## 核心结果
+
+full24 控制变量实验结果：
 
 | 变体 | Token | 质量 |
 |------|------:|------|
-| 纯文本 A（同 24 题） | **95,377** | 24/24 |
-| **结构化 C（全功能）** | **30,221** | **24/24** |
-| 结构化 B（无缓存） | 49,540 | 24/24 |
+| 纯文本 A，同 24 题 | 95,377 | 24/24 |
+| 结构化 C，全功能 | 30,221 | 24/24 |
+| 结构化 B，无缓存 | 49,540 | 24/24 |
 
-**C vs A 省 Token：68.3%**（同条件，非折算）· 对抗题 **6/6**
+结构化全功能 C 相比纯文本 A 节省 Token：68.3%，对抗题通过 6/6。
 
-数据：[docs/full24_controlled_comparison.md](docs/full24_controlled_comparison.md)
+详细数据见 [docs/full24_controlled_comparison.md](docs/full24_controlled_comparison.md)。
+
+## 关键文档
+
+| 文档 | 说明 |
+|------|------|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构与课程要求对照 |
+| [docs/STATUS_SUMMARY.md](docs/STATUS_SUMMARY.md) | 当前状态总览 |
+| [docs/PROJECT_RECORD.md](docs/PROJECT_RECORD.md) | 指标、实验、对话和产物记录 |
+| [docs/CURRENT_STATUS_AND_ROADMAP.md](docs/CURRENT_STATUS_AND_ROADMAP.md) | 通俗解读与后续路线 |
+| [experiments/README.md](experiments/README.md) | 实验脚本说明 |
