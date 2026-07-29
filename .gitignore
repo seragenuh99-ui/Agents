@@ -24,6 +24,8 @@ venv/
 build/
 dist/*
 !dist/702solver_full24_demo.exe
+!dist/702solver_full24_demo_linux/
+!dist/702solver_full24_demo_linux/**
 702solver_dashboard.spec
 702solver_dashboard_live.spec
 
